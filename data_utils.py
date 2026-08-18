@@ -36,20 +36,21 @@ class DataWrapper:
         self.seed = seed
 
     def fit(self, dataframe, all_category=False):
-        self.raw_dim = dataframe.shape[1]
-        self.raw_columns = dataframe.columns
-        self.all_distinct_values = {}
-        self.num_normalizer = {}
-        self.num_dim = 0
-        self.columns = []
-        self.col_dim = []
-        self.col_dtype = {}
+        self.raw_dim = dataframe.shape[1]  # 原始数据的列数
+        self.raw_columns = dataframe.columns  # 原始数据的列名
+        self.all_distinct_values = {}  # For categorical columns 存储分类型列的所有唯一值
+        self.num_normalizer = {}  # For numerical columns存储数值型列的归一化器
+        self.num_dim = 0  # 数值型列的维度
+        self.columns = []  # 处理后的列名
+        self.col_dim = []  # 每列的维度
+        self.col_dtype = {}  # 每列的数据类型
         for i, col in enumerate(self.raw_columns):
             if all_category:
                 break
             if col == 'label':
                 continue
             if is_numeric_dtype(dataframe[col]):
+                # 去除缺失值后的列数据
                 col_data = dataframe.loc[pd.notna(dataframe[col])][col]
                 self.col_dtype[col] = col_data.dtype
                 if self.num_encoder == "quantile":
@@ -67,11 +68,12 @@ class DataWrapper:
                 self.num_normalizer[col].fit(col_data.values.reshape(-1, 1))
                 self.columns.append(col)
                 self.num_dim += 1
-                self.col_dim.append(1)
+                self.col_dim.append(1)  # 数值型列的维度为1
         for i, col in enumerate(self.raw_columns):
             if col not in self.num_normalizer.keys():
                 col_data = dataframe.loc[pd.notna(dataframe[col])][col]
                 self.col_dtype[col] = col_data.dtype
+                # 获取该列的所有唯一值，并排序
                 distinct_values = col_data.unique()
                 distinct_values.sort()
                 self.all_distinct_values[col] = distinct_values
@@ -79,7 +81,10 @@ class DataWrapper:
                 self.col_dim.append(max(1, int(np.ceil(np.log2(len(distinct_values))))))
 
     def transform(self, data):
+        # normalize the numreical column and transform the categorical data to oridinal type
+        # 根据 self.columns 中的列名顺序重新排序输入数据的列,并将 DataFrame 转换为 NumPy 数组
         reorder_data = data[self.columns].values
+        # 用于存储处理后的数据列
         norm_data = []
         for i, col in enumerate(self.columns):
             col_data = reorder_data[:, i]
@@ -88,7 +93,9 @@ class DataWrapper:
                 col_data = self.ValsToBit(col_data, self.col_dim[i])
                 norm_data.append(col_data)
             elif col in self.num_normalizer.keys():
+                # reshape(-1, 1): 将数据重塑为二维数组，方便归一化器处理
                 norm_data.append(self.num_normalizer[col].transform(col_data.reshape(-1, 1)).reshape(-1, 1))
+        # 将所有处理后的数据列按列合并成一个二维数组
         norm_data = np.concatenate(norm_data, axis=1)
         norm_data = norm_data.astype(np.float32)
         return norm_data
@@ -110,6 +117,9 @@ class DataWrapper:
     def save_transformed_data(self, data, save_path):
         df_transformed = self.transform_to_dataframe(data)
         df_transformed.to_csv(save_path, index=False)
+        print(f"预处理后的数据已保存到: {save_path}")
+        print(f"  形状: {df_transformed.shape}")
+        print(f"  列名: {list(df_transformed.columns)}")
         return df_transformed
 
     def ReOrderColumns(self, data: pd.DataFrame):
@@ -146,14 +156,17 @@ class DataWrapper:
 
     def NumValsToCat(self, col, values):
         cat_values = np.zeros_like(values).astype(object)
+        # print(col_name, values)
         values = np.clip(values, 0, len(self.all_distinct_values[col]) - 1)
         for i, val in enumerate(values):
+            # val = np.clip(val, self.Mins[col_id], self.Maxs[col_id])
             cat_values[i] = self.all_distinct_values[col][int(val)]
         return cat_values
 
     def ReverseToOrdi(self, data):
         reverse_data = []
 
+        # Unnorm the normalized numerical columns, and reverse the binary code to ordinal columns
         for i, col in enumerate(self.columns):
             col_data = self.GetColData(data, i)
             if col in self.all_distinct_values.keys():
@@ -180,6 +193,11 @@ class DataWrapper:
         reverse_data = np.concatenate(reverse_data, axis=1)
         return reverse_data
 
+    # def Reverse(self, data):
+    #     data = self.ReverseToOrdi(data)
+    #     data = self.ReverseToCat(data)
+    #     data = pd.DataFrame(data, columns=self.columns)
+    #     return self.ReOrderColumns(data)
 
     def Reverse(self, data):
         """
@@ -231,17 +249,34 @@ class DataWrapper:
 
         return data
 
+    # def Reverse(self, data):
+    #     reverse_data = []
+    #     for i, col in enumerate(self.columns):
+    #         col_data = data[:, i]
+    #         if col == 'label':
+    #             col_data = np.round(col_data).astype(int)
+    #         else:
+    #             col_data = col_data
+    #         reverse_data.append(col_data.reshape(-1, 1))
+    #     reverse_data = np.concatenate(reverse_data, axis=1)
+    #     data = pd.DataFrame(reverse_data, columns=self.columns)
+    #     return self.ReOrderColumns(data)
 
+    # 从输入的样本数据中筛选出有效的样本，并返回有效样本的索引和无效样本的索引
     def RejectSample(self, sample):
+        # 所有样本索引的集合
         all_index = set(range(sample.shape[0]))
+        # 初始化为包含所有样本索引的集合
         allow_index = set(range(sample.shape[0]))
         for i, col in enumerate(self.columns):
             if col in self.all_distinct_values.keys():
+                # 对于分类型列，样本值必须在0到唯一值数量之间
                 allow_index = allow_index & set(np.where(sample[:, i] < len(self.all_distinct_values[col]))[0])
                 allow_index = allow_index & set(np.where(sample[:, i] >= 0)[0])
         reject_index = all_index - allow_index
         allow_index = np.array(list(allow_index))
         reject_index = np.array(list(reject_index))
+        # allow_sample = sample[allow_index, :]
         return allow_index, reject_index
 
 
